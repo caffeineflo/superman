@@ -5,6 +5,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
@@ -14,9 +15,14 @@ import (
 )
 
 type IMDb struct {
-	CookieAtMain   *string  `koanf:"COOKIEATMAIN"`
-	CookieUbidMain *string  `koanf:"COOKIEUBIDMAIN"`
-	Lists          []string `koanf:"LISTS"`
+	Auth           *string   `koanf:"AUTH"`
+	Email          *string   `koanf:"EMAIL"`
+	Password       *string   `koanf:"PASSWORD"`
+	CookieAtMain   *string   `koanf:"COOKIEATMAIN"`
+	CookieUbidMain *string   `koanf:"COOKIEUBIDMAIN"`
+	Lists          *[]string `koanf:"LISTS"`
+	Trace          *bool     `koanf:"TRACE"`
+	Headless       *bool     `koanf:"HEADLESS"`
 }
 
 type Trakt struct {
@@ -27,8 +33,11 @@ type Trakt struct {
 }
 
 type Sync struct {
-	Mode        *string `koanf:"MODE"`
-	SkipHistory *bool   `koanf:"SKIPHISTORY"`
+	Mode      *string        `koanf:"MODE"`
+	History   *bool          `koanf:"HISTORY"`
+	Ratings   *bool          `koanf:"RATINGS"`
+	Watchlist *bool          `koanf:"WATCHLIST"`
+	Timeout   *time.Duration `koanf:"TIMEOUT"`
 }
 
 type Config struct {
@@ -42,9 +51,13 @@ const (
 	delimiter = "_"
 	prefix    = "ITS" + delimiter
 
-	SyncModeAddOnly = "add-only"
-	SyncModeDryRun  = "dry-run"
-	SyncModeFull    = "full"
+	IMDbAuthMethodCredentials = "credentials"
+	IMDbAuthMethodCookies     = "cookies"
+	IMDbAuthMethodNone        = "none"
+	SyncModeAddOnly           = "add-only"
+	SyncModeDryRun            = "dry-run"
+	SyncModeFull              = "full"
+	SyncTimeoutDefault        = time.Minute * 10
 )
 
 func New(path string, includeEnv bool) (*Config, error) {
@@ -65,6 +78,7 @@ func New(path string, includeEnv bool) (*Config, error) {
 	if err := k.Unmarshal("", &conf); err != nil {
 		return nil, fmt.Errorf("error unmarshalling config: %w", err)
 	}
+	conf.applyDefaults()
 	return &conf, nil
 }
 
@@ -80,38 +94,52 @@ func NewFromMap(data map[string]interface{}) (*Config, error) {
 	if err := k.Unmarshal("", &conf); err != nil {
 		return nil, fmt.Errorf("error unmarshalling config: %w", err)
 	}
+	conf.applyDefaults()
 	return &conf, nil
 }
 
 func (c *Config) Validate() error {
-	if c.IMDb.CookieAtMain == nil {
-		return fmt.Errorf("config field 'IMDB_COOKIEATMAIN' is required")
+	if isNilOrEmpty(c.IMDb.Auth) {
+		return fmt.Errorf("field 'IMDB_AUTH' is required")
 	}
-	if c.IMDb.CookieUbidMain == nil {
-		return fmt.Errorf("config field 'IMDB_COOKIEUBIDMAIN' is required")
+	switch *c.IMDb.Auth {
+	case IMDbAuthMethodCredentials:
+		if isNilOrEmpty(c.IMDb.Email) {
+			return fmt.Errorf("field 'IMDB_EMAIL' is required")
+		}
+		if isNilOrEmpty(c.IMDb.Password) {
+			return fmt.Errorf("field 'IMDB_PASSWORD' is required")
+		}
+	case IMDbAuthMethodCookies:
+		if isNilOrEmpty(c.IMDb.CookieAtMain) {
+			return fmt.Errorf("field 'IMDB_COOKIEATMAIN' is required")
+		}
+		if isNilOrEmpty(c.IMDb.CookieUbidMain) {
+			return fmt.Errorf("field 'IMDB_COOKIEUBIDMAIN' is required")
+		}
+	case IMDbAuthMethodNone:
+	default:
+		return fmt.Errorf("field 'IMDB_AUTH' must be one of: %s", strings.Join(validIMDbAuthMethods(), ", "))
 	}
-	if c.Trakt.Email == nil {
-		return fmt.Errorf("config field 'TRAKT_EMAIL' is required")
+	if isNilOrEmpty(c.Trakt.Email) {
+		return fmt.Errorf("field 'TRAKT_EMAIL' is required")
 	}
-	if c.Trakt.Password == nil {
-		return fmt.Errorf("config field 'TRAKT_PASSWORD' is required")
+	if isNilOrEmpty(c.Trakt.Password) {
+		return fmt.Errorf("field 'TRAKT_PASSWORD' is required")
 	}
-	if c.Trakt.ClientID == nil {
-		return fmt.Errorf("config field 'TRAKT_CLIENTID' is required")
+	if isNilOrEmpty(c.Trakt.ClientID) {
+		return fmt.Errorf("field 'TRAKT_CLIENTID' is required")
 	}
-	if c.Trakt.ClientSecret == nil {
-		return fmt.Errorf("config field 'TRAKT_CLIENTSECRET' is required")
+	if isNilOrEmpty(c.Trakt.ClientSecret) {
+		return fmt.Errorf("field 'TRAKT_CLIENTSECRET' is required")
 	}
-	if c.Sync.Mode == nil {
-		return fmt.Errorf("config field 'SYNC_MODE' is required")
-	}
-	if c.Sync.SkipHistory == nil {
-		return fmt.Errorf("config field 'SYNC_SKIPHISTORY' is required")
+	if isNilOrEmpty(c.Sync.Mode) {
+		return fmt.Errorf("field 'SYNC_MODE' is required")
 	}
 	if !slices.Contains(validSyncModes(), *c.Sync.Mode) {
-		return fmt.Errorf("config field 'SYNC_MODE' must be one of: %s", strings.Join(validSyncModes(), ", "))
+		return fmt.Errorf("field 'SYNC_MODE' must be one of: %s", strings.Join(validSyncModes(), ", "))
 	}
-	return nil
+	return c.checkDummies()
 }
 
 func (c *Config) WriteFile(path string) error {
@@ -126,11 +154,81 @@ func (c *Config) Flatten() map[string]interface{} {
 	return c.koanf.All()
 }
 
+func (c *Config) checkDummies() error {
+	for k, v := range c.koanf.All() {
+		if value, ok := v.(string); ok {
+			if match := slices.Contains(dummyValues(), value); match {
+				return fmt.Errorf("field '%s' contains dummy value '%s'", k, value)
+			}
+			continue
+		}
+		if value, ok := v.([]interface{}); ok {
+			for _, sliceElement := range value {
+				if str, isStr := sliceElement.(string); isStr {
+					if match := slices.Contains(dummyValues(), str); match {
+						return fmt.Errorf("field '%s' contains dummy value '%s'", k, str)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (c *Config) applyDefaults() {
+	if c.IMDb.Lists == nil {
+		c.IMDb.Lists = pointer(make([]string, 0))
+	}
+	if c.IMDb.Trace == nil {
+		c.IMDb.Trace = pointer(false)
+	}
+	if c.IMDb.Headless == nil {
+		c.IMDb.Headless = pointer(true)
+	}
+	if c.Sync.History == nil {
+		c.Sync.History = pointer(false)
+	}
+	if c.Sync.Ratings == nil {
+		c.Sync.Ratings = pointer(false)
+	}
+	if c.Sync.Watchlist == nil {
+		c.Sync.Watchlist = pointer(false)
+	}
+	if c.Sync.Timeout == nil {
+		c.Sync.Timeout = pointer(SyncTimeoutDefault)
+	}
+}
+
+func pointer[T any](v T) *T {
+	return &v
+}
+
 func validSyncModes() []string {
 	return []string{
 		SyncModeFull,
 		SyncModeAddOnly,
 		SyncModeDryRun,
+	}
+}
+
+func validIMDbAuthMethods() []string {
+	return []string{
+		IMDbAuthMethodCredentials,
+		IMDbAuthMethodCookies,
+		IMDbAuthMethodNone,
+	}
+}
+
+func dummyValues() []string {
+	return []string{
+		"user@domain.com",
+		"password123",
+		"zAta|RHiA67JIrBDPaswIym3GyrTlEuQH-u9yrKP3BUNCHgVyE4oNtUzBYVKlhjjzBiM_Z-GSVnH9rKW3Hf7LdbejovoF6SI4ZmgJcTIUXoA4NVcH1Qahwm0KYCyz95o1gsgby-uQwdU6CoS6MFTnjMkLe1puNiv4uFkvo8mOQulJJeutzYedxiUd0ns9w1X_WeVXPTZWjwisPZMw3EOR6-q9xR4kCEWRW7CmWxU1AEDQbT8ns_AJJD34w1nIQUkuLgBQrvJI_pY",
+		"301-0710501-5367639",
+		"ls000000000",
+		"ls111111111",
+		"828832482dea6fffa4453f849fe873de8be54791b9acc01f6923098d0a62972d",
+		"bdf9bab88c17f3710a6394607e96cd3a21dee6e5ea0e0236e9ed06e425ed8b6f",
 	}
 }
 
@@ -143,4 +241,8 @@ func environmentVariableModifier(key string, value string) (string, any) {
 		return key, strings.Split(value, ",")
 	}
 	return key, value
+}
+
+func isNilOrEmpty(value *string) bool {
+	return value == nil || *value == ""
 }
