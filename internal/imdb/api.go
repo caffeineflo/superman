@@ -34,13 +34,14 @@ const (
 	cookieNameUbidMain = "ubid-main"
 	cookieNameDomain   = ".imdb.com"
 
-	pathBase      = "https://imdb.com"
-	pathExports   = "/exports"
-	pathList      = "/list/%s"
-	pathLists     = "/profile/lists"
-	pathRatings   = "/user/%s/ratings"
-	pathSignIn    = "/registration/ap-signin-handler/imdb_us"
-	pathWatchlist = "/list/watchlist"
+	pathBase          = "https://imdb.com"
+	pathExports       = "/exports"
+	pathList          = "/list/%s"
+	pathLists         = "/profile/lists"
+	pathRatings       = "/user/%s/ratings"
+	pathSignIn        = "/registration/ap-signin-handler/imdb_us"
+	pathUserWatchlist = "/user/%s/watchlist"
+	pathWatchlist     = "/list/watchlist"
 
 	selectorErrorPageTitle     = "h1[data-testid='error-page-title']"
 	selectorExportButton       = "div[data-testid='hero-list-subnav-export-button'] button"
@@ -238,7 +239,12 @@ func (c *client) WatchlistExport() error {
 	if *c.Auth == config.IMDbAuthMethodNone {
 		return nil
 	}
-	return c.ListExport(c.watchlistID)
+	watchlistURL := c.baseURL + fmt.Sprintf(pathUserWatchlist, c.userID)
+	if err := c.exportResource(watchlistURL); err != nil {
+		return fmt.Errorf("failure exporting watchlist %s: %w", c.watchlistID, err)
+	}
+	c.logger.Info("exported imdb watchlist", "id", c.watchlistID)
+	return nil
 }
 
 func (c *client) WatchlistGet() (*List, error) {
