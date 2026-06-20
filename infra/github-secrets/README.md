@@ -17,7 +17,7 @@ The GitHub Terraform provider marks secret values as sensitive, but plaintext va
 This stack has been staged on Proxmox at:
 
 ```sh
-/root/fharr/superman-github-secrets
+/rpool/dockerfs/terraform/superman-github-secrets
 ```
 
 The existing required secrets have already been imported into Terraform state there. Run Terraform from that directory unless you intentionally want to bootstrap a new state.
