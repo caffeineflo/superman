@@ -1,3 +1,11 @@
 build/
 dist/
 __debug_*
+
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+!.auto.tfvars.example
+!terraform.tfvars.example
