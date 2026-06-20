@@ -222,7 +222,7 @@ func (c *client) hydrate() error {
 		}
 		return false
 	})
-	if len(lids) == 0 {
+	if len(lids) == 0 && *c.DiscoverLists {
 		lids, err = c.lidsScrape()
 		if err != nil {
 			return fmt.Errorf("failure scraping list ids: %w", err)

@@ -30,6 +30,10 @@ type user struct {
 
 func NewSyncer(ctx context.Context, conf *appconfig.Config) (*Syncer, error) {
 	log := logger.NewLogger(os.Stdout)
+	if !*conf.Sync.Lists {
+		discoverLists := false
+		conf.IMDb.DiscoverLists = &discoverLists
+	}
 	imdbClient, err := imdb.NewAPI(ctx, &conf.IMDb, log)
 	if err != nil {
 		return nil, fmt.Errorf("failure initialising imdb client: %w", err)

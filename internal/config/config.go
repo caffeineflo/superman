@@ -16,15 +16,16 @@ import (
 )
 
 type IMDb struct {
-	Auth         *IMDbAuthMethod `koanf:"AUTH"`
-	Email        *string         `koanf:"EMAIL"`
-	Password     *string         `koanf:"PASSWORD"`
-	CookieAtMain *string         `koanf:"COOKIEATMAIN"`
-	Lists        *[]string       `koanf:"LISTS"`
-	IgnoredLists *[]string       `koanf:"IGNOREDLISTS"`
-	Trace        *bool           `koanf:"TRACE"`
-	Headless     *bool           `koanf:"HEADLESS"`
-	BrowserPath  *string         `koanf:"BROWSERPATH"`
+	Auth          *IMDbAuthMethod `koanf:"AUTH"`
+	Email         *string         `koanf:"EMAIL"`
+	Password      *string         `koanf:"PASSWORD"`
+	CookieAtMain  *string         `koanf:"COOKIEATMAIN"`
+	Lists         *[]string       `koanf:"LISTS"`
+	IgnoredLists  *[]string       `koanf:"IGNOREDLISTS"`
+	Trace         *bool           `koanf:"TRACE"`
+	Headless      *bool           `koanf:"HEADLESS"`
+	BrowserPath   *string         `koanf:"BROWSERPATH"`
+	DiscoverLists *bool           `koanf:"-"`
 }
 
 type Trakt struct {
@@ -213,6 +214,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.IMDb.BrowserPath == nil {
 		c.IMDb.BrowserPath = pointer("")
+	}
+	if c.IMDb.DiscoverLists == nil {
+		c.IMDb.DiscoverLists = pointer(true)
 	}
 	if c.Sync.Mode == nil {
 		c.Sync.Mode = pointer(SyncModeDryRun)
