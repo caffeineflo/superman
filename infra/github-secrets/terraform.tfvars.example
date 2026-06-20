@@ -1,9 +1,0 @@
-sync_secret_values = {
-  IMDB_AUTH          = "cookies"
-  IMDB_COOKIEATMAIN  = "replace-me"
-  SYNC_MODE          = "dry-run"
-  TRAKT_CLIENTID     = "replace-me"
-  TRAKT_CLIENTSECRET = "replace-me"
-  TRAKT_EMAIL        = "replace-me"
-  TRAKT_PASSWORD     = "replace-me"
-}
