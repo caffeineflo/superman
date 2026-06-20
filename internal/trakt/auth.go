@@ -91,7 +91,11 @@ func (ac *authClient) getAuthCodes(ctx context.Context) (*authCodesResponse, err
 		return nil, fmt.Errorf("failure marshaling auth codes body: %w", err)
 	}
 	body := bytes.NewReader(b)
-	resp, err := doRequest(ctx, ac.client, http.MethodPost, ac.baseURL, pathAuthCodes, nil, body, nil, http.StatusOK)
+	headers := map[string]string{
+		"trakt-api-key":     *ac.conf.ClientID,
+		"trakt-api-version": "2",
+	}
+	resp, err := doRequest(ctx, ac.client, http.MethodPost, ac.baseURL, pathAuthCodes, nil, body, headers, http.StatusOK)
 	if err != nil {
 		return nil, err
 	}
