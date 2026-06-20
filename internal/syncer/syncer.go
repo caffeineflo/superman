@@ -2,40 +2,39 @@ package syncer
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 
 	appconfig "github.com/cecobask/imdb-trakt-sync/internal/config"
-	"github.com/cecobask/imdb-trakt-sync/internal/entities"
-	"github.com/cecobask/imdb-trakt-sync/pkg/client"
-	"github.com/cecobask/imdb-trakt-sync/pkg/logger"
+	"github.com/cecobask/imdb-trakt-sync/internal/imdb"
+	"github.com/cecobask/imdb-trakt-sync/internal/logger"
+	"github.com/cecobask/imdb-trakt-sync/internal/trakt"
 )
 
 type Syncer struct {
 	logger      *slog.Logger
-	imdbClient  client.IMDbClientInterface
-	traktClient client.TraktClientInterface
+	imdbClient  imdb.API
+	traktClient trakt.API
 	user        *user
 	conf        appconfig.Sync
 	authless    bool
 }
 
 type user struct {
-	imdbLists    map[string]entities.IMDbList
-	imdbRatings  map[string]entities.IMDbItem
-	traktLists   map[string]entities.TraktList
-	traktRatings map[string]entities.TraktItem
+	imdbLists    map[string]imdb.List
+	imdbRatings  map[string]imdb.Item
+	traktLists   map[string]trakt.List
+	traktRatings map[string]trakt.Item
 }
 
 func NewSyncer(ctx context.Context, conf *appconfig.Config) (*Syncer, error) {
 	log := logger.NewLogger(os.Stdout)
-	imdbClient, err := client.NewIMDbClient(ctx, &conf.IMDb, log)
+	imdbClient, err := imdb.NewAPI(ctx, &conf.IMDb, log)
 	if err != nil {
 		return nil, fmt.Errorf("failure initialising imdb client: %w", err)
 	}
-	traktClient, err := client.NewTraktClient(conf.Trakt, log)
+	traktClient, err := trakt.NewAPI(ctx, conf.Trakt, log)
 	if err != nil {
 		return nil, fmt.Errorf("failure initialising trakt client: %w", err)
 	}
@@ -43,36 +42,39 @@ func NewSyncer(ctx context.Context, conf *appconfig.Config) (*Syncer, error) {
 		logger:      log,
 		imdbClient:  imdbClient,
 		traktClient: traktClient,
-		user: &user{
-			imdbLists:    make(map[string]entities.IMDbList, len(*conf.IMDb.Lists)),
-			imdbRatings:  make(map[string]entities.IMDbItem),
-			traktLists:   make(map[string]entities.TraktList, len(*conf.IMDb.Lists)),
-			traktRatings: make(map[string]entities.TraktItem),
-		},
-		conf:     conf.Sync,
-		authless: *conf.IMDb.Auth == appconfig.IMDbAuthMethodNone,
+		user:        &user{},
+		conf:        conf.Sync,
+		authless:    *conf.IMDb.Auth == appconfig.IMDbAuthMethodNone,
 	}
-	for _, lid := range *conf.IMDb.Lists {
-		syncer.user.imdbLists[lid] = entities.IMDbList{ListID: lid}
+	if *conf.Sync.Ratings {
+		syncer.user.imdbRatings = make(map[string]imdb.Item)
+		syncer.user.traktRatings = make(map[string]trakt.Item)
+	}
+	if *conf.Sync.Lists || *conf.Sync.Watchlist {
+		syncer.user.imdbLists = make(map[string]imdb.List, len(*conf.IMDb.Lists))
+		syncer.user.traktLists = make(map[string]trakt.List, len(*conf.IMDb.Lists))
+		for _, lid := range *conf.IMDb.Lists {
+			syncer.user.imdbLists[lid] = imdb.List{ListID: lid}
+		}
 	}
 	return syncer, nil
 }
 
-func (s *Syncer) Sync() error {
+func (s *Syncer) Sync(ctx context.Context) error {
 	s.logger.Info("sync started")
-	if err := s.hydrate(); err != nil {
+	if err := s.hydrate(ctx); err != nil {
 		s.logger.Error("failure hydrating imdb client", logger.Error(err))
 		return err
 	}
-	if err := s.syncLists(); err != nil {
+	if err := s.syncLists(ctx); err != nil {
 		s.logger.Error("failure syncing lists", logger.Error(err))
 		return err
 	}
-	if err := s.syncRatings(); err != nil {
+	if err := s.syncRatings(ctx); err != nil {
 		s.logger.Error("failure syncing ratings", logger.Error(err))
 		return err
 	}
-	if err := s.syncHistory(); err != nil {
+	if err := s.syncHistory(ctx); err != nil {
 		s.logger.Error("failure syncing history", logger.Error(err))
 		return err
 	}
@@ -80,12 +82,42 @@ func (s *Syncer) Sync() error {
 	return nil
 }
 
-func (s *Syncer) hydrate() error {
-	lids := make([]string, len(s.user.imdbLists))
-	var i int
+func (s *Syncer) setupTraktLists(ctx context.Context, imdbLists imdb.Lists) (trakt.IDMetas, error) {
+	traktLists, err := s.traktClient.ListsGetAllMeta(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failure fetching trakt lists metadata: %w", err)
+	}
+	traktListsMetaMap := make(map[string]trakt.IDMeta, len(traktLists))
+	for _, traktList := range traktLists {
+		traktListsMetaMap[*traktList.Name] = traktList.IDMeta
+	}
+
+	traktListsMeta := make(trakt.IDMetas, 0, len(imdbLists))
+	for _, imdbList := range imdbLists {
+		s.user.imdbLists[imdbList.ListID] = imdbList
+		if *s.conf.Mode == appconfig.SyncModeDryRun {
+			s.logger.Info("sync would have created trakt list", "name", imdbList.ListName)
+			continue
+		}
+		traktListMeta, ok := traktListsMetaMap[imdbList.ListName]
+		if !ok {
+			newTraktListMeta, err := s.traktClient.ListCreate(ctx, imdbList.ListName)
+			if err != nil {
+				return nil, fmt.Errorf("failure creating trakt list %s: %w", imdbList.ListName, err)
+			}
+			traktListMeta = *newTraktListMeta
+		}
+		traktListMeta.IMDb = imdbList.ListID
+		traktListsMeta = append(traktListsMeta, traktListMeta)
+	}
+
+	return traktListsMeta, nil
+}
+
+func (s *Syncer) hydrate(ctx context.Context) error {
+	lids := make([]string, 0, len(s.user.imdbLists))
 	for lid := range s.user.imdbLists {
-		lids[i] = lid
-		i++
+		lids = append(lids, lid)
 	}
 	if *s.conf.Ratings {
 		if err := s.imdbClient.RatingsExport(); err != nil {
@@ -107,31 +139,13 @@ func (s *Syncer) hydrate() error {
 		if err != nil {
 			return fmt.Errorf("failure fetching imdb lists: %w", err)
 		}
-		traktIDMetas := make(entities.TraktIDMetas, 0, len(imdbLists))
-		for _, imdbList := range imdbLists {
-			s.user.imdbLists[imdbList.ListID] = imdbList
-			traktIDMetas = append(traktIDMetas, entities.TraktIDMeta{
-				IMDb:     imdbList.ListID,
-				Slug:     entities.InferTraktListSlug(imdbList.ListName),
-				ListName: &imdbList.ListName,
-			})
+		traktIDMetas, err := s.setupTraktLists(ctx, imdbLists)
+		if err != nil {
+			return fmt.Errorf("failure setting up trakt lists: %w", err)
 		}
-		traktLists, delegatedErrors := s.traktClient.ListsGet(traktIDMetas)
-		for _, delegatedErr := range delegatedErrors {
-			var notFoundError *client.TraktListNotFoundError
-			if errors.As(delegatedErr, &notFoundError) {
-				listName := traktIDMetas.GetListNameFromSlug(notFoundError.Slug)
-				if syncMode := *s.conf.Mode; syncMode == appconfig.SyncModeDryRun {
-					msg := fmt.Sprintf("sync mode %s would have created trakt list %s to backfill imdb list %s", syncMode, notFoundError.Slug, listName)
-					s.logger.Info(msg)
-					continue
-				}
-				if err = s.traktClient.ListAdd(notFoundError.Slug, listName); err != nil {
-					return fmt.Errorf("failure creating trakt list: %w", err)
-				}
-				continue
-			}
-			return fmt.Errorf("failure hydrating trakt lists: %w", delegatedErr)
+		traktLists, err := s.traktClient.ListsGet(ctx, traktIDMetas)
+		if err != nil {
+			return fmt.Errorf("failure hydrating trakt lists: %w", err)
 		}
 		for _, traktList := range traktLists {
 			s.user.traktLists[traktList.IDMeta.IMDb] = traktList
@@ -146,14 +160,14 @@ func (s *Syncer) hydrate() error {
 			return fmt.Errorf("failure fetching imdb watchlist: %w", err)
 		}
 		s.user.imdbLists[imdbWatchlist.ListID] = *imdbWatchlist
-		traktWatchlist, err := s.traktClient.WatchlistGet()
+		traktWatchlist, err := s.traktClient.WatchlistGet(ctx)
 		if err != nil {
 			return fmt.Errorf("failure fetching trakt watchlist: %w", err)
 		}
 		s.user.traktLists[imdbWatchlist.ListID] = *traktWatchlist
 	}
 	if *s.conf.Ratings {
-		traktRatings, err := s.traktClient.RatingsGet()
+		traktRatings, err := s.traktClient.RatingsGet(ctx)
 		if err != nil {
 			return fmt.Errorf("failure fetching trakt ratings: %w", err)
 		}
@@ -177,65 +191,71 @@ func (s *Syncer) hydrate() error {
 	return nil
 }
 
-func (s *Syncer) syncLists() error {
+func (s *Syncer) syncLists(ctx context.Context) error {
 	if !*s.conf.Watchlist {
 		s.logger.Info("skipping watchlist sync")
 	}
 	if !*s.conf.Lists {
 		s.logger.Info("skipping lists sync")
+	}
+	if !*s.conf.Watchlist && !*s.conf.Lists {
 		return nil
 	}
-	for _, list := range s.user.imdbLists {
-		traktListSlug := entities.InferTraktListSlug(list.ListName)
-		diff := entities.ListDifference(list, s.user.traktLists[list.ListID])
-		if list.IsWatchlist {
-			if len(diff["add"]) > 0 {
-				if syncMode := *s.conf.Mode; syncMode == appconfig.SyncModeDryRun {
-					msg := fmt.Sprintf("sync mode %s would have added %d trakt list item(s)", syncMode, len(diff["add"]))
-					s.logger.Info(msg, slog.Any("watchlist", diff["add"]))
+	for _, imdbList := range s.user.imdbLists {
+		diff := listDiff(imdbList, s.user.traktLists[imdbList.ListID])
+		if imdbList.IsWatchlist {
+			if len(diff.Add) > 0 {
+				if *s.conf.Mode == appconfig.SyncModeDryRun {
+					s.logger.Info("sync would have added trakt watchlist items", "count", len(diff.Add))
 					continue
 				}
-				if err := s.traktClient.WatchlistItemsAdd(diff["add"]); err != nil {
+				if err := s.traktClient.WatchlistItemsAdd(ctx, diff.Add); err != nil {
 					return fmt.Errorf("failure adding items to trakt watchlist: %w", err)
 				}
+			} else {
+				s.logger.Info("no trakt watchlist items to add")
 			}
-			if len(diff["remove"]) > 0 {
-				if syncMode := *s.conf.Mode; syncMode == appconfig.SyncModeDryRun || syncMode == appconfig.SyncModeAddOnly {
-					msg := fmt.Sprintf("sync mode %s would have deleted %d trakt list item(s)", syncMode, len(diff["remove"]))
-					s.logger.Info(msg, slog.Any("watchlist", diff["remove"]))
+			if len(diff.Remove) > 0 {
+				if *s.conf.Mode == appconfig.SyncModeDryRun || *s.conf.Mode == appconfig.SyncModeAddOnly {
+					s.logger.Info("sync would have removed trakt watchlist items", "count", len(diff.Remove))
 					continue
 				}
-				if err := s.traktClient.WatchlistItemsRemove(diff["remove"]); err != nil {
-					return fmt.Errorf("failure removing items from trakt watchlist: %w", err)
+				if err := s.traktClient.WatchlistItemsRemove(ctx, diff.Remove); err != nil {
+					return fmt.Errorf("failure removing trakt watchlist items: %w", err)
 				}
+			} else {
+				s.logger.Info("no trakt watchlist items to remove")
 			}
 			continue
 		}
-		if len(diff["add"]) > 0 {
-			if syncMode := *s.conf.Mode; syncMode == appconfig.SyncModeDryRun {
-				msg := fmt.Sprintf("sync mode %s would have added %d trakt list item(s)", syncMode, len(diff["add"]))
-				s.logger.Info(msg, slog.Any(traktListSlug, diff["add"]))
+		traktListID := s.user.traktLists[imdbList.ListID].IDMeta.Trakt
+		if len(diff.Add) > 0 {
+			if *s.conf.Mode == appconfig.SyncModeDryRun {
+				s.logger.Info("sync would have added trakt list items", "count", len(diff.Add), "name", imdbList.ListName)
 				continue
 			}
-			if err := s.traktClient.ListItemsAdd(traktListSlug, diff["add"]); err != nil {
-				return fmt.Errorf("failure adding items to trakt list %s: %w", traktListSlug, err)
+			if err := s.traktClient.ListItemsAdd(ctx, traktListID, imdbList.ListName, diff.Add); err != nil {
+				return fmt.Errorf("failure adding items to trakt list %s: %w", imdbList.ListName, err)
 			}
+		} else {
+			s.logger.Info("no trakt list items to add", "name", imdbList.ListName)
 		}
-		if len(diff["remove"]) > 0 {
-			if syncMode := *s.conf.Mode; syncMode == appconfig.SyncModeDryRun || syncMode == appconfig.SyncModeAddOnly {
-				msg := fmt.Sprintf("sync mode %s would have deleted %d trakt list item(s)", syncMode, len(diff["remove"]))
-				s.logger.Info(msg, slog.Any(traktListSlug, diff["remove"]))
+		if len(diff.Remove) > 0 {
+			if *s.conf.Mode == appconfig.SyncModeDryRun || *s.conf.Mode == appconfig.SyncModeAddOnly {
+				s.logger.Info("sync would have deleted trakt list items", "count", len(diff.Remove), "name", imdbList.ListName)
 				continue
 			}
-			if err := s.traktClient.ListItemsRemove(traktListSlug, diff["remove"]); err != nil {
-				return fmt.Errorf("failure removing items from trakt list %s: %w", traktListSlug, err)
+			if err := s.traktClient.ListItemsRemove(ctx, traktListID, imdbList.ListName, diff.Remove); err != nil {
+				return fmt.Errorf("failure removing trakt list items from %s: %w", imdbList.ListName, err)
 			}
+		} else {
+			s.logger.Info("no trakt list items to remove", "name", imdbList.ListName)
 		}
 	}
 	return nil
 }
 
-func (s *Syncer) syncRatings() error {
+func (s *Syncer) syncRatings(ctx context.Context) error {
 	if s.authless {
 		s.logger.Info("skipping ratings sync since no imdb auth was provided")
 		return nil
@@ -244,31 +264,33 @@ func (s *Syncer) syncRatings() error {
 		s.logger.Info("skipping ratings sync")
 		return nil
 	}
-	diff := entities.ItemsDifference(s.user.imdbRatings, s.user.traktRatings)
-	if len(diff["add"]) > 0 {
-		if syncMode := *s.conf.Mode; syncMode == appconfig.SyncModeDryRun {
-			msg := fmt.Sprintf("sync mode %s would have added %d trakt rating item(s)", syncMode, len(diff["add"]))
-			s.logger.Info(msg, slog.Any("ratings", diff["add"]))
+	diff := itemsDifference(s.user.imdbRatings, s.user.traktRatings)
+	if len(diff.Add) > 0 {
+		if *s.conf.Mode == appconfig.SyncModeDryRun {
+			s.logger.Info("sync would have added trakt ratings", "count", len(diff.Add))
 		} else {
-			if err := s.traktClient.RatingsAdd(diff["add"]); err != nil {
+			if err := s.traktClient.RatingsAdd(ctx, diff.Add); err != nil {
 				return fmt.Errorf("failure adding trakt ratings: %w", err)
 			}
 		}
+	} else {
+		s.logger.Info("no trakt ratings to add")
 	}
-	if len(diff["remove"]) > 0 {
-		if syncMode := *s.conf.Mode; syncMode == appconfig.SyncModeDryRun || syncMode == appconfig.SyncModeAddOnly {
-			msg := fmt.Sprintf("sync mode %s would have deleted %d trakt rating item(s)", syncMode, len(diff["remove"]))
-			s.logger.Info(msg, slog.Any("ratings", diff["remove"]))
+	if len(diff.Remove) > 0 {
+		if *s.conf.Mode == appconfig.SyncModeDryRun || *s.conf.Mode == appconfig.SyncModeAddOnly {
+			s.logger.Info("sync would have deleted trakt ratings", "count", len(diff.Remove))
 		} else {
-			if err := s.traktClient.RatingsRemove(diff["remove"]); err != nil {
+			if err := s.traktClient.RatingsRemove(ctx, diff.Remove); err != nil {
 				return fmt.Errorf("failure removing trakt ratings: %w", err)
 			}
 		}
+	} else {
+		s.logger.Info("no trakt ratings to remove")
 	}
 	return nil
 }
 
-func (s *Syncer) syncHistory() error {
+func (s *Syncer) syncHistory(ctx context.Context) error {
 	if s.authless {
 		s.logger.Info("skipping history sync since no imdb auth was provided")
 		return nil
@@ -280,60 +302,62 @@ func (s *Syncer) syncHistory() error {
 	// imdb doesn't offer functionality similar to trakt history, hence why there can't be a direct mapping between them
 	// the syncer will assume a user to have watched an item if they've submitted a rating for it
 	// if the above is satisfied and the user's history for this item is empty, a new history entry is added!
-	diff := entities.ItemsDifference(s.user.imdbRatings, s.user.traktRatings)
-	if len(diff["add"]) > 0 {
-		var historyToAdd entities.TraktItems
-		for i := range diff["add"] {
-			traktItemID, err := diff["add"][i].GetItemID()
+	diff := itemsDifference(s.user.imdbRatings, s.user.traktRatings)
+	if len(diff.Add) > 0 {
+		var historyToAdd trakt.Items
+		for i := range diff.Add {
+			traktItemID, err := diff.Add[i].GetItemID()
 			if err != nil {
 				return fmt.Errorf("failure fetching trakt item id: %w", err)
 			}
-			history, err := s.traktClient.HistoryGet(diff["add"][i].Type, *traktItemID)
+			history, err := s.traktClient.HistoryGet(ctx, diff.Add[i].Type, *traktItemID)
 			if err != nil {
-				return fmt.Errorf("failure fetching trakt history for %s %s: %w", diff["add"][i].Type, *traktItemID, err)
+				return fmt.Errorf("failure fetching trakt history for %s %s: %w", diff.Add[i].Type, *traktItemID, err)
 			}
 			if len(history) > 0 {
 				continue
 			}
-			historyToAdd = append(historyToAdd, diff["add"][i])
+			historyToAdd = append(historyToAdd, diff.Add[i])
 		}
 		if len(historyToAdd) > 0 {
-			if syncMode := *s.conf.Mode; syncMode == appconfig.SyncModeDryRun {
-				msg := fmt.Sprintf("sync mode %s would have added %d trakt history item(s)", syncMode, len(historyToAdd))
-				s.logger.Info(msg, slog.Any("history", historyToAdd))
+			if *s.conf.Mode == appconfig.SyncModeDryRun {
+				s.logger.Info("sync would have added trakt history", "count", len(historyToAdd))
 			} else {
-				if err := s.traktClient.HistoryAdd(historyToAdd); err != nil {
+				if err := s.traktClient.HistoryAdd(ctx, historyToAdd); err != nil {
 					return fmt.Errorf("failure adding trakt history: %w", err)
 				}
 			}
 		}
+	} else {
+		s.logger.Info("no history to add to trakt")
 	}
-	if len(diff["remove"]) > 0 {
-		var historyToRemove entities.TraktItems
-		for i := range diff["remove"] {
-			traktItemID, err := diff["remove"][i].GetItemID()
+	if len(diff.Remove) > 0 {
+		var historyToRemove trakt.Items
+		for i := range diff.Remove {
+			traktItemID, err := diff.Remove[i].GetItemID()
 			if err != nil {
 				return fmt.Errorf("failure fetching trakt item id: %w", err)
 			}
-			history, err := s.traktClient.HistoryGet(diff["remove"][i].Type, *traktItemID)
+			history, err := s.traktClient.HistoryGet(ctx, diff.Remove[i].Type, *traktItemID)
 			if err != nil {
-				return fmt.Errorf("failure fetching trakt history for %s %s: %w", diff["remove"][i].Type, *traktItemID, err)
+				return fmt.Errorf("failure fetching trakt history for %s %s: %w", diff.Remove[i].Type, *traktItemID, err)
 			}
 			if len(history) == 0 {
 				continue
 			}
-			historyToRemove = append(historyToRemove, diff["remove"][i])
+			historyToRemove = append(historyToRemove, diff.Remove[i])
 		}
 		if len(historyToRemove) > 0 {
-			if syncMode := *s.conf.Mode; syncMode == appconfig.SyncModeDryRun || syncMode == appconfig.SyncModeAddOnly {
-				msg := fmt.Sprintf("sync mode %s would have deleted %d trakt history item(s)", syncMode, len(historyToRemove))
-				s.logger.Info(msg, slog.Any("history", historyToRemove))
+			if *s.conf.Mode == appconfig.SyncModeDryRun || *s.conf.Mode == appconfig.SyncModeAddOnly {
+				s.logger.Info("sync would have deleted trakt history", "count", len(historyToRemove))
 			} else {
-				if err := s.traktClient.HistoryRemove(historyToRemove); err != nil {
+				if err := s.traktClient.HistoryRemove(ctx, historyToRemove); err != nil {
 					return fmt.Errorf("failure removing trakt history: %w", err)
 				}
 			}
 		}
+	} else {
+		s.logger.Info("no trakt history to remove")
 	}
 	return nil
 }

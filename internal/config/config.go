@@ -16,15 +16,15 @@ import (
 )
 
 type IMDb struct {
-	Auth           *string   `koanf:"AUTH"`
-	Email          *string   `koanf:"EMAIL"`
-	Password       *string   `koanf:"PASSWORD"`
-	CookieAtMain   *string   `koanf:"COOKIEATMAIN"`
-	CookieUbidMain *string   `koanf:"COOKIEUBIDMAIN"`
-	Lists          *[]string `koanf:"LISTS"`
-	Trace          *bool     `koanf:"TRACE"`
-	Headless       *bool     `koanf:"HEADLESS"`
-	BrowserPath    *string   `koanf:"BROWSERPATH"`
+	Auth         *IMDbAuthMethod `koanf:"AUTH"`
+	Email        *string         `koanf:"EMAIL"`
+	Password     *string         `koanf:"PASSWORD"`
+	CookieAtMain *string         `koanf:"COOKIEATMAIN"`
+	Lists        *[]string       `koanf:"LISTS"`
+	IgnoredLists *[]string       `koanf:"IGNOREDLISTS"`
+	Trace        *bool           `koanf:"TRACE"`
+	Headless     *bool           `koanf:"HEADLESS"`
+	BrowserPath  *string         `koanf:"BROWSERPATH"`
 }
 
 type Trakt struct {
@@ -35,7 +35,7 @@ type Trakt struct {
 }
 
 type Sync struct {
-	Mode      *string        `koanf:"MODE"`
+	Mode      *SyncMode      `koanf:"MODE"`
 	History   *bool          `koanf:"HISTORY"`
 	Ratings   *bool          `koanf:"RATINGS"`
 	Watchlist *bool          `koanf:"WATCHLIST"`
@@ -54,14 +54,18 @@ const (
 	delimiter = "_"
 	prefix    = "ITS" + delimiter
 
-	IMDbAuthMethodCredentials = "credentials"
-	IMDbAuthMethodCookies     = "cookies"
-	IMDbAuthMethodNone        = "none"
-	SyncModeAddOnly           = "add-only"
-	SyncModeDryRun            = "dry-run"
-	SyncModeFull              = "full"
-	SyncTimeoutDefault        = time.Minute * 15
+	IMDbAuthMethodCredentials IMDbAuthMethod = "credentials"
+	IMDbAuthMethodCookies     IMDbAuthMethod = "cookies"
+	IMDbAuthMethodNone        IMDbAuthMethod = "none"
+	SyncModeAddOnly           SyncMode       = "add-only"
+	SyncModeDryRun            SyncMode       = "dry-run"
+	SyncModeFull              SyncMode       = "full"
+	SyncTimeoutDefault                       = time.Minute * 15
 )
+
+type IMDbAuthMethod string
+
+type SyncMode string
 
 func New(path string, includeEnv bool) (*Config, error) {
 	k := koanf.New(delimiter)
@@ -102,7 +106,7 @@ func NewFromMap(data map[string]interface{}) (*Config, error) {
 }
 
 func (c *Config) Validate() error {
-	if isNilOrEmpty(c.IMDb.Auth) {
+	if c.IMDb.Auth == nil || *c.IMDb.Auth == "" {
 		return fmt.Errorf("field 'IMDB_AUTH' is required")
 	}
 	switch *c.IMDb.Auth {
@@ -117,15 +121,15 @@ func (c *Config) Validate() error {
 		if isNilOrEmpty(c.IMDb.CookieAtMain) {
 			return fmt.Errorf("field 'IMDB_COOKIEATMAIN' is required")
 		}
-		if isNilOrEmpty(c.IMDb.CookieUbidMain) {
-			return fmt.Errorf("field 'IMDB_COOKIEUBIDMAIN' is required")
-		}
 	case IMDbAuthMethodNone:
 	default:
 		return fmt.Errorf("field 'IMDB_AUTH' must be one of: %s", strings.Join(validIMDbAuthMethods(), ", "))
 	}
-	if err := c.validateListIdentifiers(); err != nil {
+	if err := c.validateListIdentifiers(*c.IMDb.Lists); err != nil {
 		return fmt.Errorf("field 'IMDB_LISTS' is invalid: %w", err)
+	}
+	if err := c.validateListIdentifiers(*c.IMDb.IgnoredLists); err != nil {
+		return fmt.Errorf("field 'IMDB_IGNOREDLISTS' is invalid: %w", err)
 	}
 	if isNilOrEmpty(c.Trakt.Email) {
 		return fmt.Errorf("field 'TRAKT_EMAIL' is required")
@@ -139,20 +143,20 @@ func (c *Config) Validate() error {
 	if isNilOrEmpty(c.Trakt.ClientSecret) {
 		return fmt.Errorf("field 'TRAKT_CLIENTSECRET' is required")
 	}
-	if isNilOrEmpty(c.Sync.Mode) {
+	if c.Sync.Mode == nil || *c.Sync.Mode == "" {
 		return fmt.Errorf("field 'SYNC_MODE' is required")
 	}
-	if !slices.Contains(validSyncModes(), *c.Sync.Mode) {
+	if !slices.Contains(validSyncModes(), string(*c.Sync.Mode)) {
 		return fmt.Errorf("field 'SYNC_MODE' must be one of: %s", strings.Join(validSyncModes(), ", "))
 	}
 	return c.checkDummies()
 }
 
-func (c *Config) validateListIdentifiers() error {
-	re := regexp.MustCompile(`^ls[0-9]{9}$`)
-	for _, id := range *c.IMDb.Lists {
+func (c *Config) validateListIdentifiers(lids []string) error {
+	re := regexp.MustCompile(`^ls[0-9]{9,10}$`)
+	for _, id := range lids {
 		if ok := re.MatchString(id); !ok {
-			return fmt.Errorf("valid list id starts with ls and is followed by 9 digits, but got %s", id)
+			return fmt.Errorf("valid list id starts with ls and is followed by 9 or 10 digits, but got %s", id)
 		}
 	}
 	return nil
@@ -198,6 +202,9 @@ func (c *Config) applyDefaults() {
 	if c.IMDb.Lists == nil {
 		c.IMDb.Lists = pointer(make([]string, 0))
 	}
+	if c.IMDb.IgnoredLists == nil {
+		c.IMDb.IgnoredLists = pointer(make([]string, 0))
+	}
 	if c.IMDb.Trace == nil {
 		c.IMDb.Trace = pointer(false)
 	}
@@ -233,17 +240,17 @@ func pointer[T any](v T) *T {
 
 func validSyncModes() []string {
 	return []string{
-		SyncModeFull,
-		SyncModeAddOnly,
-		SyncModeDryRun,
+		string(SyncModeFull),
+		string(SyncModeAddOnly),
+		string(SyncModeDryRun),
 	}
 }
 
 func validIMDbAuthMethods() []string {
 	return []string{
-		IMDbAuthMethodCredentials,
-		IMDbAuthMethodCookies,
-		IMDbAuthMethodNone,
+		string(IMDbAuthMethodCredentials),
+		string(IMDbAuthMethodCookies),
+		string(IMDbAuthMethodNone),
 	}
 }
 
@@ -255,6 +262,8 @@ func dummyValues() []string {
 		"301-0710501-5367639",
 		"ls000000000",
 		"ls111111111",
+		"ls222222222",
+		"ls333333333",
 		"828832482dea6fffa4453f849fe873de8be54791b9acc01f6923098d0a62972d",
 		"bdf9bab88c17f3710a6394607e96cd3a21dee6e5ea0e0236e9ed06e425ed8b6f",
 	}
@@ -265,10 +274,17 @@ func environmentVariableModifier(key string, value string) (string, any) {
 	if value == "" {
 		return key, nil
 	}
-	if strings.Contains(value, ",") {
+	if slices.Contains(sliceFields(), key) && strings.Contains(value, ",") {
 		return key, strings.Split(value, ",")
 	}
 	return key, value
+}
+
+func sliceFields() []string {
+	return []string{
+		"IMDB_LISTS",
+		"IMDB_IGNOREDLISTS",
+	}
 }
 
 func isNilOrEmpty(value *string) bool {

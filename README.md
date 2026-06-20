@@ -28,8 +28,8 @@ Keep in mind that this application is performing one-way sync from IMDb to Trakt
         </td>
         <td>
             Authentication method to be used for IMDb:<br />
-            <code>credentials</code> => IMDB_EMAIL + IMDB_PASSWORD field required<br />
-            <code>cookies</code> => IMDB_COOKIEATMAIN + IMDB_COOKIEUBIDMAIN fields required<br />
+            <code>credentials</code> => IMDB_EMAIL + IMDB_PASSWORD fields required<br />
+            <code>cookies</code> => IMDB_COOKIEATMAIN field required<br />
             <code>none</code> => IMDB_LISTS field required
         </td>
     </tr>
@@ -56,16 +56,6 @@ Keep in mind that this application is performing one-way sync from IMDb to Trakt
         </td>
     </tr>
     <tr>
-        <td>IMDB_COOKIEUBIDMAIN</td>
-        <td>-</td>
-        <td>-</td>
-        <td>
-            Cookie value required when IMDB_AUTH => <code>cookies</code>. Get the following cookie information from your
-            browser:<br />
-            <code>name: ubid-main | domain: .imdb.com</code>
-        </td>
-    </tr>
-    <tr>
         <td>IMDB_LISTS</td>
         <td>-</td>
         <td>-</td>
@@ -75,6 +65,17 @@ Keep in mind that this application is performing one-way sync from IMDb to Trakt
             browser - the ID is in the URL with format <code>ls#########</code>. If provided as GitHub secret or
             environment variable, define its values as comma-separated list. Keep in mind the <a
                 href="https://forums.trakt.tv/t/personal-list-updates/10170#limits-3">Trakt list limits</a>!
+        </td>
+    </tr>
+    <tr>
+        <td>IMDB_IGNOREDLISTS</td>
+        <td>-</td>
+        <td>-</td>
+        <td>
+            Array of IMDb list IDs that you do <b>NOT</b> want synced to Trakt. This is useful if you would like to
+            sync all your lists, but ignore some. In order to get the ID of an IMDb list, open it from a browser - the
+            ID is in the URL with format <code>ls#########</code>. If provided as GitHub secret or environment variable,
+            define its values as comma-separated list.
         </td>
     </tr>
     <tr>
