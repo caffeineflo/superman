@@ -57,8 +57,10 @@ func NewSyncer(ctx context.Context, conf *appconfig.Config) (*Syncer, error) {
 	if *conf.Sync.Lists || *conf.Sync.Watchlist {
 		syncer.user.imdbLists = make(map[string]imdb.List, len(*conf.IMDb.Lists))
 		syncer.user.traktLists = make(map[string]trakt.List, len(*conf.IMDb.Lists))
-		for _, lid := range *conf.IMDb.Lists {
-			syncer.user.imdbLists[lid] = imdb.List{ListID: lid}
+		if *conf.Sync.Lists {
+			for _, lid := range *conf.IMDb.Lists {
+				syncer.user.imdbLists[lid] = imdb.List{ListID: lid}
+			}
 		}
 	}
 	return syncer, nil
